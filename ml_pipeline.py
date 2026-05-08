@@ -12,7 +12,81 @@ import traceback
 from ydata_profiling import ProfileReport
 import os
 
+import plotly.express as px
+import plotly.figure_factory as ff
+import numpy as np
 
+def _eda_overview_tab(df):
+    st.subheader("Overview")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Rows", f"{df.shape[0]:,}")
+    c2.metric("Columns", df.shape[1])
+    c3.metric("Missing cells", int(df.isnull().sum().sum()))
+    c4.metric("Duplicate rows", int(df.duplicated().sum()))
+    with st.expander("Summary statistics", expanded=False):
+        st.dataframe(df.describe(include="all").transpose(), use_container_width=True)
+
+
+def _eda_missing_tab(df):
+    st.subheader("Missing values")
+    missing = df.isnull().sum()
+    missing_df = missing[missing > 0]
+    if len(missing_df) > 0:
+        fig = px.bar(
+            missing_df,
+            labels={"value": "Missing", "index": "Column"},
+            title="Missing values per column",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.success("No missing values in this dataset.")
+
+
+def _eda_distributions_tab(df):
+    st.subheader("Distributions")
+    numeric_cols = df.select_dtypes(include=np.number).columns
+    if len(numeric_cols) == 0:
+        st.info("No numeric columns for histograms.")
+        return
+    column = st.selectbox("Column", numeric_cols, key="eda_hist_col")
+    fig = px.histogram(df, x=column, marginal="box", nbins=40, title=f"Distribution — {column}")
+    st.plotly_chart(fig, use_container_width=True)
+    if len(numeric_cols) >= 2:
+        selected = st.multiselect(
+            "Scatter matrix columns",
+            numeric_cols,
+            default=list(numeric_cols[: min(3, len(numeric_cols))]),
+            key="eda_scatter_cols",
+        )
+        if len(selected) >= 2:
+            fig2 = px.scatter_matrix(df, dimensions=selected)
+            st.plotly_chart(fig2, use_container_width=True)
+
+
+def _eda_correlation_tab(df):
+    st.subheader("Correlation")
+    numeric_df = df.select_dtypes(include=np.number)
+    if numeric_df.shape[1] < 2:
+        st.info("Need at least two numeric columns for a correlation heatmap.")
+        return
+    corr = numeric_df.corr()
+    fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", title="Correlation heatmap")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def advanced_eda_dashboard(df):
+    """Interactive EDA with tabs (Overview, Distributions, Correlation, Missing)."""
+    tab_ov, tab_dist, tab_corr, tab_miss = st.tabs(
+        ["Overview", "Distributions", "Correlation", "Missing values"]
+    )
+    with tab_ov:
+        _eda_overview_tab(df)
+    with tab_dist:
+        _eda_distributions_tab(df)
+    with tab_corr:
+        _eda_correlation_tab(df)
+    with tab_miss:
+        _eda_missing_tab(df)
 
 def get_all_datasets():
     df = get_data('index')
@@ -31,19 +105,25 @@ def show_profile_reports(container):
             components.html(html_content, height=800, scrolling=True)
 
 def data_profile(df,container):
-    profile = ProfileReport(df)
+    profile = ProfileReport(df, minimal=True)
     profile.to_file("profile_report.html")
     with open('profile_report.html', 'r') as f:
         html_content = f.read()
     with container:
         components.html(html_content, height=800, scrolling=True)
     
+import time
+
 def update_progress(progress_bar, step, max_steps):
     progress = int((step / max_steps) * 100)
-    t = f"Processing....Step {step}/{max_steps}"
+
+    text = f"Processing....Step {step}/{max_steps}"
     if step == max_steps:
-        t="Process Completed"
-    progress_bar.progress(progress, text=t)
+        text = "Process Completed"
+
+    progress_bar.progress(progress, text=text)
+
+    time.sleep(0.5)   # allow UI update
 
 def display_sweetviz_report(dataframe,container):
     report = sv.analyze(dataframe)
@@ -66,49 +146,134 @@ def handle_exception(e):
     with st.expander("See Error details"):
         st.error(traceback.format_exc())
 
+
+def store_model_comparison(comparison_df, task):
+    try:
+        st.session_state["model_comparison_df"] = comparison_df.copy()
+    except Exception:
+        st.session_state["model_comparison_df"] = comparison_df
+    st.session_state["last_task"] = task
+    st.session_state["training_complete"] = True
+
+
+def get_dataset_catalog_df():
+    """PyCaret built-in dataset index for the explorer; empty on failure."""
+    try:
+        return get_data("index")
+    except Exception:
+        return pd.DataFrame()
+
 def load_data(uploaded_file):
     try:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
         elif uploaded_file.name.endswith('.xlsx'):
             df = pd.read_excel(uploaded_file)
-        st.write("## Dataset")
-        st.write(df.head())
-        st.session_state['dataframe'] = df
+        st.session_state["dataframe"] = df
+        st.session_state["dataset_meta"] = {
+            "name": uploaded_file.name,
+            "rows": int(df.shape[0]),
+            "columns": int(df.shape[1]),
+            "missing": int(df.isnull().sum().sum()),
+            "size_mb": round(uploaded_file.size / (1024 * 1024), 3) if getattr(uploaded_file, "size", None) else None,
+        }
+        st.success("Dataset loaded successfully.")
+        st.dataframe(df.head(), use_container_width=True)
     except Exception as e:
         handle_exception(e)
 
 def load_pycaret_dataset(dataset_name):
     try:
         df = get_data(dataset_name)
-        st.write("## Dataset")
-        st.write(df.head())
-        st.session_state['dataframe'] = df
+        st.session_state["dataframe"] = df
+        st.session_state["dataset_meta"] = {
+            "name": str(dataset_name),
+            "rows": int(df.shape[0]),
+            "columns": int(df.shape[1]),
+            "missing": int(df.isnull().sum().sum()),
+            "size_mb": None,
+        }
+        st.success(f"Loaded **{dataset_name}**.")
+        st.dataframe(df.head(), use_container_width=True)
     except Exception as e:
         handle_exception(e)
 
-
+"""
 def eda_report():
     if 'dataframe' in st.session_state:
         df = st.session_state['dataframe']
+
         col1,col2 = st.columns([0.6,0.4])
         new_report = col1.toggle(":blue[Generate New]", value=True)
         show_button = col2.button("Show Report")
-        pb = st.progress(0, text="Generating Report")
+
+        pb = st.progress(0, text="Generating Report...")
         cont = st.container(border=False)
+
         try:
             if show_button:
+
                 if new_report:
+
                     update_progress(pb,1,4)
+
                     data_profile(df, cont)
+
                     update_progress(pb,2,4)
+
                     display_sweetviz_report(df, cont)
+
+                    update_progress(pb,3,4)
+
+                    show_profile_reports(cont)
+
                     update_progress(pb,4,4)
+
                 else:
                     show_profile_reports(cont)
 
         except Exception as e:
             handle_exception(e)
+
+"""
+
+def eda_report():
+
+    if 'dataframe' not in st.session_state:
+        st.warning("Upload dataset first")
+        return
+
+    df = st.session_state['dataframe']
+    st.session_state["eda_completed"] = True
+
+    advanced_eda_dashboard(df)
+
+    st.divider()
+
+    st.subheader("📄 Generate Detailed Report")
+
+    tool = st.selectbox(
+        "Select EDA Tool",
+        ["None","YData Profiling","Sweetviz"]
+    )
+
+    if st.button("Generate Report"):
+
+        if tool == "YData Profiling":
+
+            profile = ProfileReport(df, minimal=True)
+            profile.to_file("profile_report.html")
+
+            with open("profile_report.html","r") as f:
+                components.html(f.read(), height=800)
+
+        elif tool == "Sweetviz":
+
+            report = sv.analyze(df)
+            report.show_html("sweetviz_report.html", open_browser=False)
+
+            with open("sweetviz_report.html","r") as f:
+                components.html(f.read(), height=800)
 
 
 def build_model(task, container):
@@ -116,9 +281,27 @@ def build_model(task, container):
     if 'dataframe' in st.session_state:
         df = st.session_state['dataframe']
         feature_expander = container.expander("Select Columns")
-        target_column = feature_expander.selectbox("Select target column", df.columns) if task in ["Classification", "Regression", "Time Series Forecasting"] else None
-        numerical_columns = feature_expander.multiselect("Select numerical columns", df.columns)
-        categorical_columns = feature_expander.multiselect("Select categorical columns", df.columns)
+
+        # Automatically suggest valid options for each type
+        numeric_candidates = df.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_candidates = df.select_dtypes(exclude=[np.number]).columns.tolist()
+
+        target_column = feature_expander.selectbox(
+            "Select target column",
+            df.columns
+        ) if task in ["Classification", "Regression", "Time Series Forecasting"] else None
+
+        numerical_columns = feature_expander.multiselect(
+            "Select numerical columns",
+            numeric_candidates,
+            default=numeric_candidates
+        )
+
+        categorical_columns = feature_expander.multiselect(
+            "Select categorical columns",
+            categorical_candidates,
+            default=categorical_candidates
+        )
 
         params_expander = container.expander("Tune Parameters")
         # Data Preparation
@@ -166,7 +349,7 @@ def build_model(task, container):
                 'feature_selection': feature_selection,
                 'feature_selection_method': feature_selection_method
             }
-            pb = st.progress(0, text="Building Model...")
+            pb = st.progress(0, text="Training model...")
 
             if task == "Classification" and st.button("Run Classification"):
                 
@@ -182,7 +365,9 @@ def build_model(task, container):
                 update_progress(pb,2,7)
                 best_model = cls_compare()
                 update_progress(pb,3,7)
-                st.dataframe(cls_pull())
+                cmp_df = cls_pull()
+                store_model_comparison(cmp_df, task)
+                st.dataframe(cmp_df, use_container_width=True)
                 update_progress(pb,4,7)
                 cls_plot(best_model, plot='auc',display_format="streamlit")
                 cls_plot(best_model, plot='confusion_matrix',display_format="streamlit")
@@ -207,7 +392,9 @@ def build_model(task, container):
                 exp = reg_setup(**setup_kwargs)
                 best_model = reg_compare()
                 update_progress(pb,4,7)
-                st.dataframe(reg_pull())
+                cmp_df = reg_pull()
+                store_model_comparison(cmp_df, task)
+                st.dataframe(cmp_df, use_container_width=True)
                 update_progress(pb,5,7)
                 st.image(reg_plot(best_model, plot='residuals', save=True))
                 st.image(reg_plot(best_model, plot='error', save=True))
@@ -232,7 +419,9 @@ def build_model(task, container):
                 clu_plot(best_model, plot='elbow', display_format='streamlit')
                 update_progress(pb,5,7)
                 st.write(best_model)
-                st.dataframe(clu_pull())
+                cmp_df = clu_pull()
+                store_model_comparison(cmp_df, task)
+                st.dataframe(cmp_df, use_container_width=True)
                 update_progress(pb,6,7)
                 clu_save(best_model, 'best_clustering_model')
                 st.write('Best Model based on metrics - ')
@@ -253,7 +442,9 @@ def build_model(task, container):
                 ano_plot(best_model, plot='tsne', display_format='streamlit')
                 update_progress(pb,5,7)                
                 st.write(best_model)
-                st.dataframe(ano_pull())
+                cmp_df = ano_pull()
+                store_model_comparison(cmp_df, task)
+                st.dataframe(cmp_df, use_container_width=True)
                 update_progress(pb,6,7)
                 ano_save(best_model, 'best_anomaly_model')
                 st.write('Best Model based on metrics - ')
@@ -270,8 +461,10 @@ def build_model(task, container):
                     df = df.set_index(date_column).asfreq('D')
                     exp = ts_setup(df, target=target_column, numeric_imputation_target='mean', numeric_imputation_exogenous='mean')
                     best_model = ts_compare()
-                    update_progress(pb,3,5)                    
-                    st.dataframe(ts_pull())
+                    update_progress(pb,3,5)
+                    cmp_df = ts_pull()
+                    store_model_comparison(cmp_df, task)
+                    st.dataframe(cmp_df, use_container_width=True)
                     ts_plot(best_model, plot='forecast', display_format="streamlit")
                     ts_save(best_model, 'best_timeseries_model')
                     update_progress(pb,4,5)
@@ -281,7 +474,9 @@ def build_model(task, container):
         except Exception as e:
             handle_exception(e)
 
-def download_model(task):
+def download_model(task=None):
+    if task is None:
+        task = st.session_state.get("last_task", "Classification")
     model_file = None
     if task == "Classification":
         model_file = 'best_classification_model.pkl'
